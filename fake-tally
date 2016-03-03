@@ -1,0 +1,72 @@
+#!/bin/bash
+
+set -e
+
+if [ -z "$1" ] ; then
+    echo "Error: Need a time"
+    exit 1
+fi
+# BASE=`date -f '%H:%M:%S' "$1" +'%s'`
+case "$1" in
+@*)
+    BASE=`date -r "${1:1}" +'%s'`
+    ;;
+*)
+    BASE=`date -j "$1" +'%s'`
+    ;;
+esac
+shift
+
+GNUDATE=0
+
+MOD=""
+case "$1" in
+    +[0-9]*[.][0-9]*|-[0-9]*[.][0-9]*)
+        MOD="$1" ; shift
+        case "$1" in
+            sec|s)
+                MOD=`echo "(0 $MOD) / 1" | bc`
+                shift
+            ;;
+            min|m)
+                MOD=`echo "(0 $MOD) * 60 / 1" | bc`
+                shift
+            ;;
+            hr|h)
+                MOD=`echo "(0 $MOD) * 60 * 60 / 1" | bc`
+                shift
+            ;;
+            *)
+                MOD=`echo "(0 $MOD) * 60 / 1" | bc`
+            ;;
+        esac
+    ;;
+    +[0-9]*|-[0-9]*)
+        MOD="$1" ; shift
+        case "$1" in
+            sec|s)
+                shift
+            ;;
+            min|m)
+                MOD=$(( $MOD * 60 ))
+                shift
+            ;;
+            hr|h)
+                MOD=$(( $MOD * 60 * 60 ))
+                shift
+            ;;
+            *)
+                MOD=$(( $MOD * 60 ))
+            ;;
+        esac
+    ;; 
+esac
+
+TOS=$(( $BASE + ${MOD:-0} ))
+WHAT='%work'
+if [ ! -z "$1" ] ; then
+    WHAT="$*"
+fi
+
+echo `date -r "$TOS" +'%s %Y-%m-%d %H:%M:%S -'` "$WHAT"
+

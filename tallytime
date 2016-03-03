@@ -1,0 +1,498 @@
+#!/usr/bin/env python
+
+import os
+import os.path
+import sys
+import time
+import re
+from optparse import OptionParser
+import ConfigParser
+
+version = "%prog Version 0.9"
+usage = "usage: %prog [options] time log message"
+description = (
+    "A stupidly simple time tracker. Supports concurrent marked "
+    "segments using leading punctuation on a word ('started @work "
+    "on %task'), comments with a stand-alone leading punctuation in "
+    "the comment-line ('% comment only seen in raw segment')."
+)
+
+epilog = (
+    "The time log message can be a single argument or can be multiple "
+    "arguments. There is no support for an on-going task. You start one "
+    "task, then start a new task. The time associated with marks is "
+    "tracked by summing each of the log entries with the same mark. You "
+    "can have multiple marks in the same log entry, and this is the only "
+    "supported way to track multiple concurrent tasks."
+)
+
+# mark_re = re.compile(r"(?:\b|^|(?<=\s))(?:[^\w\s]|_)[\w](?:[\w-]*[\w])?(?:\b|$|(?=\s))")
+mark_re = re.compile(r"(?:^|(?<=\s))(?:[^\w\s]|_)[\w](?:[^\s]*[\w])?(?:$|(?=\s))")
+comment_re = re.compile(r"^\W+ ")
+all_segments = ("raw", "comment", "mark", "last", "rawraw", "secs")
+default_segments = "raw,mark,last"
+default_log_filename = os.path.join(".tallytime", "time.log")
+default_report_filename = os.path.join(".tallytime", "report.txt")
+default_verbose = 1
+
+parser = OptionParser(usage=usage, version=version,
+                      description=description, epilog=epilog)
+parser.add_option("-v", "--verbose",
+                  action="count", default=0,
+                  help="display output [default]")
+parser.add_option("-q", "--quiet",
+                  action="count", default=0,
+                  help="be less verbose")
+parser.add_option("--draft", action="store_true", default=False,
+                  help="dump a draft of the report to stdout")
+parser.add_option("--tally", default=False, action="store_true",
+                  help="Instead of logging a time entry, generate the report.")
+parser.add_option("--last", default=False, action="store_true",
+                  help="Print the last-entered log and current time elapsed.")
+parser.add_option("-i", "--log-filename", 
+                  metavar="FILE", help="Set active time log FILE. Defaults to "
+                                       "be relative to your home directory."
+                                  + " [default: %s]" % default_log_filename)
+parser.add_option("-o", "--report-filename", 
+                  metavar="FILE", help="Set time report FILE. Defaults to "
+                                       "be relative to your home directory."
+                                  + " [default: %s]" % default_report_filename)
+parser.add_option("-s", "--segments",
+                  default=[], action="append",
+                  help="one or more output segments: raw, comment, mark, "
+                       "secs, last, all, none, (and any can be preceded "
+                       "with 'no' to disable) "
+                       + "[default: %s]" % default_segments)
+
+parser.add_option("-c", "--config", metavar="FILE",
+                  default=os.path.join(".tallytime", "config.ini"),
+                  help="Set the configuration file to FILE. "
+                       "[default: %default]")
+
+parser.add_option("--write-config", action="store_true", default=False,
+                  help="Write the current configuration to the configuration "
+                       "file.")
+
+def find_home():
+    if os.environ.has_key("HOME"):
+        return os.environ["HOME"]
+    elif os.environ.has_key("USERPROFILE"):
+        return os.environ["USERPROFILE"]
+    elif os.environ.has_key("HOMEDRIVE") and os.environ.has_key("HOMEPATH"):
+        return os.environ["HOMEDRIVE"] + os.environ["HOMEPATH"]
+    return "/"
+
+def verbose(s, nonl=False):
+    global _verbose
+    if _verbose > 0:
+        if nonl:
+            print s,
+        else:
+            print s
+
+def debug(i, s, nonl=False):
+    global _verbose
+    if _verbose > i:
+        if nonl:
+            print s,
+        else:
+            print s
+
+def print_last_line(timelog_name, timen = None, close = True):
+    last_line = None
+    if timen is None:
+        timen = time.time()
+    try:
+        timelog_file = open(timelog_name, "r+tU")
+        timelog_file.seek(0, os.SEEK_END)
+        # tell() can lie on Windows, so be flexible
+        approx_size = timelog_file.tell() 
+        if approx_size == 0:
+            last_line = None
+        elif approx_size <= 5120:
+            timelog_file.seek(0, os.SEEK_SET)
+            log_tmp = timelog_file.readlines()
+            last_line = log_tmp[-1]
+        else:
+            read_size = 4096
+            log_tmp = ""
+            while read_size < approx_size and "\n" not in log_tmp:
+                timelog_file.seek(read_size, os.SEEK_END)
+                log_tmp = timelog_file.read(read_size)
+                read_size += 4096
+            if "\n" not in log_tmp:
+                timelog_file.seek(0, os.SEEK_SET)
+                log_tmp = timelog_file.readlines()
+            else:
+                log_tmp = log_tmp.split("\n")
+            last_line = log_tmp[-1]
+        timelog_file.seek(0, os.SEEK_END)
+    except IOError:
+        timelog_file = open(timelog_name, "at")
+        timen = float("%.0f" % timen)
+        last_line = "%.0f - - - -" % timen
+    if last_line is not None:
+        if len(last_line) > 0 and last_line[-1] in '\r\n':
+            last_line = last_line[:-1]
+        if len(last_line) > 0 and last_line[-1] in '\r\n':
+            last_line = last_line[:-1]
+        subs = last_line.split(" ", 4)
+        secs = float(subs[0])
+        phours = secs / 60.0 / 60.0
+        chours = timen / 60.0 / 60.0
+        hours = chours - phours
+        last_line = "[%s] %s / %.4f min" % (" ".join(subs[1:3]),
+                                            subs[-1], hours * 60.0)
+        s = "Last entry: %s" % (last_line,)
+        print s
+    if close:
+        timelog_file.close()
+        return None
+    return timelog_file
+
+class TimeReport(object):
+    def __init__(self):
+        pass
+    def __str__(self):
+        pass
+    def store_all_raw(self, duration, line, comment=False):
+        self.store_raw(line)
+        self.store_punch(duration, line, comment=comment)
+    def store_raw(self, line):
+        pass
+    def store_punch(self, duration, line, comment=False):
+        pass
+    def store_message(self, line):
+        pass
+    def store_mark(self, mark, duration=0.0):
+        pass
+    def store_last(self, message):
+        pass
+
+def log_time(timelog_name, args, segments):
+    last_mode = segments.get("last")
+    last_line = None
+    timen = time.time()
+    if last_mode:
+        timelog_file = print_last_line(timelog_name, timen = timen,
+                                       close = False)
+    else:
+        try:
+            timelog_file = open(timelog_name, "r+tU")
+            timelog_file.seek(0, os.SEEK_END)
+        except IOError:
+            timelog_file = open(timelog_name, "at")
+
+    times = time.localtime(timen)
+    s = "%.0f %s - %s" % (timen, time.strftime("%Y-%m-%d %H:%M:%S"), " ".join(args));
+    verbose(s)
+
+    timelog_file.write(s + "\n")
+    timelog_file.close()
+    return 0
+
+def hours_str(label, d):
+    s = "%s Sections:\n" % (label, )
+    keylist = list(d.keys())
+    keylist.sort()
+    for k in keylist:
+        s = s + "  %s: %.4f hours / %.4f min\n" % (k, d[k], d[k] * 60.0)
+    return s
+
+def tally_time(timelog_lines, timereport, timetally, marktally, segments,
+               had_args):
+    hours_total = 0
+    starthours = None
+    raw_mode = None
+    last_mode = segments.get("last", False)
+    secs_mode = segments.get("secs", False)
+    if segments.get("rawraw", False):
+        raw_mode = "rawraw"
+    elif segments.get("raw", False):
+        raw_mode = "raw"
+    global mark_re
+    global comment_re
+    last_line = None
+    last_whole_line = None
+    for line in timelog_lines:
+        if len(line) > 0 and line[-1] in '\r\n':
+            line = line[:-1]
+        if len(line) > 0 and line[-1] in '\r\n':
+            line = line[:-1]
+        if len(line) == 0:
+            continue
+        subs = line.split(" ", 4)
+        if comment_re.match(subs[-1]):
+            if raw_mode == "rawraw":
+                s = " ".join(subs)
+            else:
+                s = "        [%s %s] %s" % (subs[1], subs[2], subs[-1])
+            if raw_mode is not None:
+                if timereport is not None:
+                    timereport.write(s + "\n")
+                verbose(s)
+            else:
+                debug(2, s)
+            continue
+        secs = float(subs[0])
+        phours = secs / 60.0 / 60.0
+        if starthours == None:
+            s = "Starting time: %s" % " ".join(subs[1:3])
+            if timereport is not None:
+                timereport.write(s + "\n")
+            verbose(s)
+            hours = 0.0
+        else:
+            hours = phours - starthours
+            hours_total += hours
+        if raw_mode == "rawraw":
+            s = " ".join(subs)
+        elif not secs_mode:
+            s = "%.4f min [%s %s] %s" % (hours * 60.0, subs[1],
+                                         subs[2], subs[-1])
+        else:
+            s = "%.4f min (%s) [%s %s] %s" % (hours * 60.0, subs[0], subs[1],
+                                              subs[2], subs[-1])
+        if last_whole_line is not None:
+            lastcomment = last_whole_line[-1]
+            for mark in mark_re.findall(lastcomment):
+                marktally[mark] = marktally.get(mark, 0) + hours
+            timetally[lastcomment] = timetally.get(lastcomment, 0) + hours
+            last_line = "[%s] %s / %.4f min" % (" ".join(last_whole_line[1:3]),
+                                                    lastcomment, hours * 60.0)
+        last_whole_line = subs
+        if raw_mode in ("raw", "rawraw"):
+            if timereport is not None:
+                timereport.write(s + "\n")
+            verbose(s)
+        else:
+            debug(2, s)
+        starthours = phours
+
+    if not had_args:
+        s = "Last entry: %s" % (last_line,)
+        if last_mode:
+            if timereport is not None:
+                timereport.write(s + "\n")
+            verbose(s)
+        else:
+            debug(2, s)
+    return hours_total
+
+def segments_to_unicode(segments):
+    ret = []
+    for s in segments:
+        if segments.get(s):
+            ret.append(s)
+    return ",".join(ret)
+
+def parse_segments(segments, segs):
+    if segs is None:
+        return segments
+    if isinstance(segs, basestring):
+        segs = (segs, )
+    for sEarly in segs:
+        for s in sEarly.split(","):
+            s = s.strip()
+            if s == "all" or s == "nonone":
+                for sLate in all_segments:
+                    segments[sLate] = True
+            elif s == "none" or s == "noall":
+                for sLate in all_segments:
+                    segments[sLate] = False
+            elif s.startswith("no"):
+                s = s[2:]
+                if s[0] == '-': s = s[1:]
+                segments[s] = False
+            else:
+                segments[s] = True
+    for s in segments:
+        if s not in all_segments:
+            if s is not None and s != "":
+                print "Error: unknown segment %s" % s
+                return 1
+    for s in all_segments:
+        if s not in segments:
+            segments[s] = False
+    return segments
+
+def join_config_options(config, options):
+    global default_segments
+    global all_segments
+    global default_log_filename
+    global default_report_filename
+    global default_verbose
+    global _verbose
+    ret = {}
+    segments = {}
+    parse_segments(segments, default_segments)
+    if config.has_section("tallytime"):
+        for option in config.options("tallytime"):
+            if option == "segments":
+                parse_segments(segments, config.get("tallytime", option))
+            else:
+                ret[option] = config.get("tallytime", option)
+    if options.tally:
+        if config.has_section("report"):
+            for option in config.options("report"):
+                if option == "segments":
+                    parse_segments(segments, config.get("report", option))
+                else:
+                    ret[option] = config.get("report", option)
+    elif options.draft:
+        if config.has_section("draft"):
+            for option in config.options("draft"):
+                if option == "segments":
+                    parse_segments(segments, config.get("draft", option))
+                else:
+                    ret[option] = config.get("draft", option)
+    else:
+        if config.has_section("log"):
+            for option in config.options("log"):
+                if option == "segments":
+                    parse_segments(segments, config.get("log", option))
+                else:
+                    ret[option] = config.get("log", option)
+    ret["config"] = os.environ.get("TALLYTIME_CONF", options.config)
+
+    parse_segments(segments, options.segments)
+    ret["segments"] = segments
+
+    ret["log_filename"] = ret.get("log_filename", default_log_filename)
+    if options.log_filename:
+        ret["log_filename"] = options.log_filename
+    ret["report_filename"] = ret.get("report_filename", default_report_filename)
+    if options.log_filename:
+        ret["report_filename"] = options.report_filename
+    if "verbose" in ret:
+        ret["verbose"] = int(ret.get("verbose"))
+    else:
+        ret["verbose"] = default_verbose
+    if options.verbose:
+        ret["verbose"] = ret["verbose"] + options.verbose - options.quiet
+    _verbose = ret["verbose"]
+    return ret
+
+def write_config(config, real_config, config_name, options):
+    section = "log"
+    if options.tally:
+        section="report"
+    elif options.draft:
+        section="draft"
+    if not config.has_section(section):
+        config.add_section(section)
+    for key in real_config:
+        if key == "segments":
+            config.set(section, key, segments_to_unicode(real_config.get(key)))
+        else:
+            config.set(section, key, unicode(real_config.get(key)))
+    if not config.has_section("tallytime"):
+        config.add_section("tallytime")
+    config_file = open(config_name, "wt")
+    config.write(config_file)
+    config_file.close()
+
+def check_dir(filename):
+    dirname = os.path.dirname(filename)
+    if not os.path.exists(dirname):
+        os.makedirs(dirname)
+
+def main(argv):
+    global _verbose
+    options, args = parser.parse_args(argv)
+
+    config_name = os.environ.get("TALLYTIME_CONF", options.config)
+    config_name = os.path.join(find_home(), config_name)
+    config = ConfigParser.SafeConfigParser()
+    config.read(config_name)
+
+    real_config = join_config_options(config, options)
+    segments = real_config.get("segments")
+
+    if options.write_config:
+        check_dir(config_name)
+        write_config(config, real_config, config_name, options)
+
+    timelog_name = os.path.join(find_home(), real_config.get("log_filename"))
+
+    ret = 0
+    if len(args) > 0:
+        check_dir(timelog_name)
+        ret = log_time(timelog_name, args, segments)
+
+    if not os.path.exists(timelog_name):
+        try:
+            tfile = open(timelog_name, "at")
+            tfile.close()
+        except IOError:
+            print "Error: Failed to open", timelog_name
+            sys.exit(1)
+
+    if options.draft:
+        if _verbose == 0:
+            _verbose = 1
+        verbose("- - - DRAFT MODE - - - - DRAFT MODE - - -")
+    elif options.last:
+        return print_last_line(timelog_name)
+    elif not options.tally:
+        return ret
+
+    timelog_report = os.path.join(find_home(), real_config.get("report_filename"))
+    try:
+        timelog = open(timelog_name, "rtU")
+    except IOError:
+        print "Error: Failed to open", timelog_name
+        sys.exit(1)
+
+    timereport = None
+    if not options.draft:
+        check_dir(timelog_report)
+        try:
+            timereport = open(timelog_report, "r+tU")
+            timereport.seek(0, os.SEEK_END)
+            timereport.write("----\n\n")
+        except IOError:
+            timereport = open(timelog_report, "at")
+
+    timelog_lines = timelog.readlines()
+    if options.draft and not args:
+        timelog_lines.append("%.0f - - - -\n" % time.time())
+
+    timetally = {}
+    marktally = {}
+
+    hours_total = tally_time(timelog_lines, timereport, timetally, marktally,
+                             segments, len(args) > 0)
+    timelog.close()
+
+    if segments.get("raw") or segments.get("rawraw"):
+        s = "Time total: %.4f hours (%.4f min)" % (hours_total, hours_total * 60.0) + "\n"
+        verbose(s, nonl=True)
+        if timereport is not None:
+            timereport.write(s)
+
+    if segments.get("comment"):
+        s = hours_str("\nComment", timetally)
+        verbose(s, nonl=True)
+        if timereport is not None:
+            timereport.write(s)
+
+    if segments.get("mark"):
+        if marktally:
+            s = hours_str("\nMark", marktally)
+        else:
+            s = "\nNo marks found"
+        verbose(s, nonl=True)
+        if timereport is not None:
+            timereport.write(s)
+
+    if timereport is not None:
+        timereport.write("\n")
+    if options.tally:
+        if timereport is not None:
+            timereport.close()
+        os.unlink(timelog_name)
+
+if __name__ == "__main__":
+    main(sys.argv[1:])
+
