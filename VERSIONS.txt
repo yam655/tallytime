@@ -1,0 +1,21 @@
+Versions
+========
+
+1.0:
+
+* arguments are incompatible with 0.9.
+  + -i / --log-filename has been removed
+  + -o / --report-filename has been removed
+  + -c / --config has been removed
+  + -h / --home replaces them
+* environment variables are incompatible with 0.9.
+  + TALLYTIME_CONF no longer exists
+  + TALLYTIME_HOME has replaced it
+* The --fake argument instead of the `fake-tally` script.
+* The --undo argument to back-out the last --tally.
+* Converted the script to Python 3
+
+0.9:
+
+- first version number
+

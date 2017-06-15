@@ -11,7 +11,7 @@ Initially, the output just printed the amount of time spent between the
 tasks and it was up to you to add things up.
 
 Since that time, however, I've added support for "tags". Tags are prefixed
-by punctuation (any punctuation) and are totalled for you in the reports.
+by punctuation (any punctuation) and are totaled for you in the reports.
 
 ## How I use it
 
@@ -25,7 +25,7 @@ Over the course of the day, I log when what I'm doing changes.
     tallytime %break
     tallytime %break +Dinner
     tallytime %work .cache
-    tallytime %break +Charlie
+    tallytime %break +Chatter
     tallytime %work
     tallytime end --tally
 
@@ -34,7 +34,7 @@ When I run "--tally" it produces a report on screen (and in the reports file):
     Mark Sections:
       %break: 10.6883 hours / 641.3000 min
       %work: 8.3269 hours / 499.6167 min
-      +Charlie: 6.2986 hours / 377.9167 min
+      +Chatter: 6.2986 hours / 377.9167 min
       +Dinner: 2.7200 hours / 163.2000 min
       +Lunch: 1.6669 hours / 100.0167 min
       .cache: 4.4889 hours / 269.3333 min
@@ -44,47 +44,45 @@ I originally wrote this tool when I was working a side job and needed to bill
 my hours. However, once I had kids I found this was very useful to track
 time when family responsibilities interfere with my normal work day.
 
-Using different prefixes it is possible to simultaniously track work using
+Using different prefixes it is possible to simultaneously track work using
 multiple levels of granularity.
 
 ## Usage
 
-Usage: tallytime [options] time log message
 
-A stupidly simple time tracker. Supports concurrent marked segments using
-leading punctuation on a word ('started @work on %task'), comments with a
-stand-alone leading punctuation in the comment-line ('% comment only seen in
-raw segment').
+    Usage: tallytime [options] time log message
 
-Options:
-  --version             show program's version number and exit
-  -h, --help            show this help message and exit
-  -v, --verbose         display output [default]
-  -q, --quiet           be less verbose
-  --draft               dump a draft of the report to stdout
-  --tally               Instead of logging a time entry, generate the report.
-  --last                Print the last-entered log and current time elapsed.
-  -i FILE, --log-filename=FILE
-                        Set active time log FILE. Defaults to be relative to
-                        your home directory. [default: .tallytime/time.log]
-  -o FILE, --report-filename=FILE
-                        Set time report FILE. Defaults to be relative to your
-                        home directory. [default: .tallytime/report.txt]
-  -s SEGMENTS, --segments=SEGMENTS
-                        one or more output segments: raw, comment, mark, secs,
-                        last, all, none, (and any can be preceded with 'no' to
-                        disable) [default: raw,mark,last]
-  -c FILE, --config=FILE
-                        Set the configuration file to FILE. [default:
-                        .tallytime/config.ini]
-  --write-config        Write the current configuration to the configuration
-                        file.
+    A stupidly simple time tracker. Supports concurrent marked segments using
+    leading punctuation on a word ('started @work on %task'), comments with a
+    stand-alone leading punctuation in the comment-line ('% comment only seen in
+    raw segment').
 
-The time log message can be a single argument or can be multiple arguments.
-There is no support for an on-going task. You start one task, then start a new
-task. The time associated with marks is tracked by summing each of the log
-entries with the same mark. You can have multiple marks in the same log entry,
-and this is the only supported way to track multiple concurrent tasks.
+    Options:
+      --version             show program's version number and exit
+      -h, --help            show this help message and exit
+      -v, --verbose         display output [default]
+      -q, --quiet           be less verbose
+      --draft               dump a draft of the report to stdout
+      --tally               Instead of logging a time entry, generate the report.
+      --last                Print the last-entered log and current time elapsed.
+      --home=DIR            Set the default configuration directory. [default:
+                        ~/.tallytime
+      -s SEGMENTS, --segments=SEGMENTS
+                            one or more output segments: raw, comment, mark, secs,
+                            last, all, none, (and any can be preceded with 'no' to
+                            disable) [default: raw,mark,last]
+      --undo                Undo the previous tally.
+      --fake=TIMESPEC       Produce timelog output for
+                            {YYYY-{MM-{DD'T'}}}HH{:MM{:SS}}
+      --write-config        Write the current configuration to the configuration
+                            file.
+
+    The time log message can be a single argument or can be multiple arguments.
+    There is no support for an on-going task. You start one task, then start a new
+    task. The time associated with marks is tracked by summing each of the log
+    entries with the same mark. You can have multiple marks in the same log entry,
+    and this is the only supported way to track multiple concurrent tasks.
+
 
 ### The different types of segments
 
@@ -175,7 +173,7 @@ Time total: 5.7475 hours (344.8500 min)
 Print all segments. This can be combined with disabling specific segments
 via the "no" prefix.
 
-tallytime --draft all,noraw,norawraw
+    tallytime --draft all,noraw,norawraw
 
 Note that only one raw mode is normally shown and there is a preference for
 the "rawraw" mode.
@@ -206,8 +204,8 @@ Here's my current configuration file.
 
 <pre>
 [tallytime]
-log_filename = .tallytime/time.log
-report_filename = .tallytime/report.txt
+log_filename = time.log
+report_filename = report.txt
 segments = none,last
 
 [report]
@@ -227,20 +225,27 @@ ourselves, that matters very little.
 
 Since this is based upon plain-text files, it is easy to edit.
 
-I've added a helper script "fake-tally" which will assist in formatting
-the date for entries in the "time.log" file.
+There's a "--fake" command-line argument to help you create an entry
+that is correctly formatted in the time.log file. If gets out-of-order with
+the surrounding entries, you'll need to manually edit the file to correct it,
+as it is simply appended to the end of the time.
 
-That script is currently a BASH file, unlike that main tallytime script
-which is a Python 3 file. This means it leverages the system's `date`
-command for some of the work.
+The "--fake" option takes a timestamp. Use an ISO date-time without timezone.
+You can either use the human-friendly ":", " " and "-" separators or the
+computer-friendly "", "T" and "" separators. (Just remember that a single
+two-digit number is an hour, not a day. To get dates parsed, you'll always
+need to specify at least an hour.)
 
-Unfortunately, that means that command doesn't currently work out-of-the-box
-for both BSD and GNU systems.
+## Accidental --tally and --undo
 
-As of right now, the script is tuned for BSD's date command (as found on Mac OS X).
-For Linux and other folks with GNU's date command it will need tweaked.
+I was logging additional information in my reports so that when I accidentally
+hit --tally, I could copy the data back to the in-progress file and pick up
+where I left off. This was sub-optimal and prevented me from getting the
+report formats that I wanted, so it was fixed in the 1.0 release.
 
-I plan on rewriting the script in Python at some point. It's also an accessory
-script and not a key part of the system, so if you have any questions about it
-right now, dig in to the source.
+We now store the last-tallied `time.log` file, and copy it back through
+the `--undo` command.
+
+The command won't work if you've created a new `time.log` file, but you'll still
+be able to copy the data from the `time.undo` file to the `time.log` file.
 

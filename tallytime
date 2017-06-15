@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
 import os
 import os.path
@@ -6,9 +6,10 @@ import sys
 import time
 import re
 from optparse import OptionParser
-import ConfigParser
+from configparser import ConfigParser
+from pathlib import Path
 
-version = "%prog Version 0.9"
+version = "%prog Version 0.10"
 usage = "usage: %prog [options] time log message"
 description = (
     "A stupidly simple time tracker. Supports concurrent marked "
@@ -26,13 +27,14 @@ epilog = (
     "supported way to track multiple concurrent tasks."
 )
 
-# mark_re = re.compile(r"(?:\b|^|(?<=\s))(?:[^\w\s]|_)[\w](?:[\w-]*[\w])?(?:\b|$|(?=\s))")
 mark_re = re.compile(r"(?:^|(?<=\s))(?:[^\w\s]|_)[\w](?:[^\s]*[\w])?(?:$|(?=\s))")
 comment_re = re.compile(r"^\W+ ")
 all_segments = ("raw", "comment", "mark", "last", "rawraw", "secs")
 default_segments = "raw,mark,last"
-default_log_filename = os.path.join(".tallytime", "time.log")
-default_report_filename = os.path.join(".tallytime", "report.txt")
+default_home = "~/.tallytime"
+default_log_filename = "time.log"
+default_report_filename = "report.txt"
+default_config_filename = "config.ini"
 default_verbose = 1
 
 parser = OptionParser(usage=usage, version=version,
@@ -49,14 +51,9 @@ parser.add_option("--tally", default=False, action="store_true",
                   help="Instead of logging a time entry, generate the report.")
 parser.add_option("--last", default=False, action="store_true",
                   help="Print the last-entered log and current time elapsed.")
-parser.add_option("-i", "--log-filename", 
-                  metavar="FILE", help="Set active time log FILE. Defaults to "
-                                       "be relative to your home directory."
-                                  + " [default: %s]" % default_log_filename)
-parser.add_option("-o", "--report-filename", 
-                  metavar="FILE", help="Set time report FILE. Defaults to "
-                                       "be relative to your home directory."
-                                  + " [default: %s]" % default_report_filename)
+parser.add_option("--home", metavar="DIR",
+                help="Set the default configuration directory. " +
+                     "[default: {}".format(default_home))
 parser.add_option("-s", "--segments",
                   default=[], action="append",
                   help="one or more output segments: raw, comment, mark, "
@@ -64,73 +61,55 @@ parser.add_option("-s", "--segments",
                        "with 'no' to disable) "
                        + "[default: %s]" % default_segments)
 
-parser.add_option("-c", "--config", metavar="FILE",
-                  default=os.path.join(".tallytime", "config.ini"),
-                  help="Set the configuration file to FILE. "
-                       "[default: %default]")
+parser.add_option("--undo", action="store_true", default=False,
+                  help="Undo the previous tally.")
+parser.add_option("--fake", metavar="TIMESPEC",
+                 help="Produce timelog output for {YYYY-{MM-{DD'T'}}}HH{:MM{:SS}}")
 
 parser.add_option("--write-config", action="store_true", default=False,
                   help="Write the current configuration to the configuration "
                        "file.")
 
-def find_home():
-    if os.environ.has_key("HOME"):
-        return os.environ["HOME"]
-    elif os.environ.has_key("USERPROFILE"):
-        return os.environ["USERPROFILE"]
-    elif os.environ.has_key("HOMEDRIVE") and os.environ.has_key("HOMEPATH"):
-        return os.environ["HOMEDRIVE"] + os.environ["HOMEPATH"]
-    return "/"
-
 def verbose(s, nonl=False):
     global _verbose
     if _verbose > 0:
         if nonl:
-            print s,
+            print (s,end="")
         else:
-            print s
+            print (s)
 
 def debug(i, s, nonl=False):
     global _verbose
     if _verbose > i:
         if nonl:
-            print s,
+            print (s,end="")
         else:
-            print s
+            print (s)
 
-def print_last_line(timelog_name, timen = None, close = True):
+def print_last_line(time_log, timen = None):
+    blocksize = 65536
     last_line = None
     if timen is None:
         timen = time.time()
     try:
-        timelog_file = open(timelog_name, "r+tU")
-        timelog_file.seek(0, os.SEEK_END)
-        # tell() can lie on Windows, so be flexible
-        approx_size = timelog_file.tell() 
+        approx_size = 0
+        if time_log.exists():
+            approx_size = time_log.stat().st_size
         if approx_size == 0:
             last_line = None
-        elif approx_size <= 5120:
-            timelog_file.seek(0, os.SEEK_SET)
-            log_tmp = timelog_file.readlines()
+        elif approx_size <= blocksize:
+            log_tmp = time_log.read_text().splitlines()
             last_line = log_tmp[-1]
         else:
-            read_size = 4096
-            log_tmp = ""
-            while read_size < approx_size and "\n" not in log_tmp:
-                timelog_file.seek(read_size, os.SEEK_END)
-                log_tmp = timelog_file.read(read_size)
-                read_size += 4096
-            if "\n" not in log_tmp:
-                timelog_file.seek(0, os.SEEK_SET)
-                log_tmp = timelog_file.readlines()
-            else:
-                log_tmp = log_tmp.split("\n")
-            last_line = log_tmp[-1]
-        timelog_file.seek(0, os.SEEK_END)
+            start = approx_size - blocksize
+            with time_log.open("rt") as infile:
+                infile.seek(start)
+                last_line = infile.read(blocksize).splitlines()[-1]
+
     except IOError:
-        timelog_file = open(timelog_name, "at")
         timen = float("%.0f" % timen)
         last_line = "%.0f - - - -" % timen
+
     if last_line is not None:
         if len(last_line) > 0 and last_line[-1] in '\r\n':
             last_line = last_line[:-1]
@@ -144,11 +123,8 @@ def print_last_line(timelog_name, timen = None, close = True):
         last_line = "[%s] %s / %.4f min" % (" ".join(subs[1:3]),
                                             subs[-1], hours * 60.0)
         s = "Last entry: %s" % (last_line,)
-        print s
-    if close:
-        timelog_file.close()
-        return None
-    return timelog_file
+        print (s)
+    return 
 
 class TimeReport(object):
     def __init__(self):
@@ -169,26 +145,34 @@ class TimeReport(object):
     def store_last(self, message):
         pass
 
-def log_time(timelog_name, args, segments):
+def log_time(time_log, args, segments, opts):
     last_mode = segments.get("last")
     last_line = None
     timen = time.time()
-    if last_mode:
-        timelog_file = print_last_line(timelog_name, timen = timen,
-                                       close = False)
-    else:
-        try:
-            timelog_file = open(timelog_name, "r+tU")
-            timelog_file.seek(0, os.SEEK_END)
-        except IOError:
-            timelog_file = open(timelog_name, "at")
-
     times = time.localtime(timen)
-    s = "%.0f %s - %s" % (timen, time.strftime("%Y-%m-%d %H:%M:%S"), " ".join(args));
+
+    if opts.fake:
+        fakeit = opts.fake.replace("-","").replace(":","")
+        fakeit = list(fakeit.replace("T", " ").split())
+        if len(fakeit) == 1 or (len(fakeit) == 2 and not fakeit):
+            fakeit.insert(0, time.strftime("%Y%m%d", times))
+        elif len(fakeit[0]) == 2:
+            fakeit[0] = time.strftime("%Y%m", times) + fakeit[0]
+        elif len(fakeit[0]) == 4:
+            fakeit[0] = time.strftime("%Y", times) + fakeit[0]
+        if len(fakeit[1]) < 6:
+            fakeit[1] = fakeit[1] + ("0" * (6 - len(fakeit[1])))
+        times = time.strptime(" ".join(fakeit), "%Y%m%d %H%M%S")
+        timen = time.mktime(times)
+            
+    s = "%.0f %s - %s" % (timen, time.strftime("%Y-%m-%d %H:%M:%S", times), " ".join(args));
     verbose(s)
 
-    timelog_file.write(s + "\n")
-    timelog_file.close()
+    if last_mode:
+        print_last_line(time_log, timen = timen)
+
+    with time_log.open("at") as outf:
+        outf.write(s + "\n")
     return 0
 
 def hours_str(label, d):
@@ -289,7 +273,7 @@ def segments_to_unicode(segments):
 def parse_segments(segments, segs):
     if segs is None:
         return segments
-    if isinstance(segs, basestring):
+    if isinstance(segs, str):
         segs = (segs, )
     for sEarly in segs:
         for s in sEarly.split(","):
@@ -309,7 +293,7 @@ def parse_segments(segments, segs):
     for s in segments:
         if s not in all_segments:
             if s is not None and s != "":
-                print "Error: unknown segment %s" % s
+                print ("Error: unknown segment %s" % s)
                 return 1
     for s in all_segments:
         if s not in segments:
@@ -353,17 +337,12 @@ def join_config_options(config, options):
                     parse_segments(segments, config.get("log", option))
                 else:
                     ret[option] = config.get("log", option)
-    ret["config"] = os.environ.get("TALLYTIME_CONF", options.config)
 
     parse_segments(segments, options.segments)
     ret["segments"] = segments
 
     ret["log_filename"] = ret.get("log_filename", default_log_filename)
-    if options.log_filename:
-        ret["log_filename"] = options.log_filename
     ret["report_filename"] = ret.get("report_filename", default_report_filename)
-    if options.log_filename:
-        ret["report_filename"] = options.report_filename
     if "verbose" in ret:
         ret["verbose"] = int(ret.get("verbose"))
     else:
@@ -372,6 +351,7 @@ def join_config_options(config, options):
         ret["verbose"] = ret["verbose"] + options.verbose - options.quiet
     _verbose = ret["verbose"]
     return ret
+
 
 def write_config(config, real_config, config_name, options):
     section = "log"
@@ -385,47 +365,47 @@ def write_config(config, real_config, config_name, options):
         if key == "segments":
             config.set(section, key, segments_to_unicode(real_config.get(key)))
         else:
-            config.set(section, key, unicode(real_config.get(key)))
+            config.set(section, key, str(real_config.get(key)))
     if not config.has_section("tallytime"):
         config.add_section("tallytime")
-    config_file = open(config_name, "wt")
-    config.write(config_file)
-    config_file.close()
+    with config_name.open("wt") as outf:
+        config.write(outf)
 
-def check_dir(filename):
-    dirname = os.path.dirname(filename)
-    if not os.path.exists(dirname):
-        os.makedirs(dirname)
 
 def main(argv):
     global _verbose
     options, args = parser.parse_args(argv)
 
-    config_name = os.environ.get("TALLYTIME_CONF", options.config)
-    config_name = os.path.join(find_home(), config_name)
-    config = ConfigParser.SafeConfigParser()
-    config.read(config_name)
+    config_home = os.environ.get("TALLYTIME_HOME", options.home)
+    if config_home == None or config_conf == "":
+        config_home = default_home
+
+    config_home = Path(config_home).expanduser() 
+    config_name = config_home / default_config_filename
+    config = ConfigParser()
+    config.read(str(config_name))
 
     real_config = join_config_options(config, options)
     segments = real_config.get("segments")
 
     if options.write_config:
-        check_dir(config_name)
+        config_name.parent.mkdir(parents=True, exist_ok=True)
         write_config(config, real_config, config_name, options)
 
-    timelog_name = os.path.join(find_home(), real_config.get("log_filename"))
+    time_log = config_home / real_config.get("log_filename")
+    undo_log = time_log.with_suffix(".undo")
 
     ret = 0
     if len(args) > 0:
-        check_dir(timelog_name)
-        ret = log_time(timelog_name, args, segments)
+        time_log.parent.mkdir(parents=True, exist_ok=True)
+        ret = log_time(time_log, args, segments, options)
 
-    if not os.path.exists(timelog_name):
+    if not time_log.exists():
         try:
-            tfile = open(timelog_name, "at")
-            tfile.close()
+            with time_log.open("at") as tfile:
+                pass
         except IOError:
-            print "Error: Failed to open", timelog_name
+            print ("Error: Failed to open", time_log)
             sys.exit(1)
 
     if options.draft:
@@ -433,28 +413,31 @@ def main(argv):
             _verbose = 1
         verbose("- - - DRAFT MODE - - - - DRAFT MODE - - -")
     elif options.last:
-        return print_last_line(timelog_name)
+        return print_last_line(time_log)
+    elif options.undo:
+        if time_log.exists():
+            time_log.write_text(undo_log.read_text())
+            return 0
+        print ("Error: Can't automatically undo if new times have been added.")
+        return 1
     elif not options.tally:
         return ret
 
-    timelog_report = os.path.join(find_home(), real_config.get("report_filename"))
-    try:
-        timelog = open(timelog_name, "rtU")
-    except IOError:
-        print "Error: Failed to open", timelog_name
-        sys.exit(1)
+    report_log = config_home / real_config.get("report_filename")
 
     timereport = None
     if not options.draft:
-        check_dir(timelog_report)
+        report_log.parent.mkdir(parents=True, exist_ok=True)
         try:
-            timereport = open(timelog_report, "r+tU")
+            timereport = report_log.open("r+t")
             timereport.seek(0, os.SEEK_END)
             timereport.write("----\n\n")
         except IOError:
-            timereport = open(timelog_report, "at")
+            timereport = report_log.open("at")
 
-    timelog_lines = timelog.readlines()
+    timelog_text = time_log.read_text()
+    undo_log.write_text(timelog_text)
+    timelog_lines = timelog_text.splitlines()
     if options.draft and not args:
         timelog_lines.append("%.0f - - - -\n" % time.time())
 
@@ -463,7 +446,6 @@ def main(argv):
 
     hours_total = tally_time(timelog_lines, timereport, timetally, marktally,
                              segments, len(args) > 0)
-    timelog.close()
 
     if segments.get("raw") or segments.get("rawraw"):
         s = "Time total: %.4f hours (%.4f min)" % (hours_total, hours_total * 60.0) + "\n"
@@ -491,7 +473,7 @@ def main(argv):
     if options.tally:
         if timereport is not None:
             timereport.close()
-        os.unlink(timelog_name)
+        time_log.unlink()
 
 if __name__ == "__main__":
     main(sys.argv[1:])
