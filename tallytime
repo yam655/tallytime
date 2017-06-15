@@ -9,7 +9,7 @@ from optparse import OptionParser
 from configparser import ConfigParser
 from pathlib import Path
 
-version = "%prog Version 0.10"
+version = "%prog Version 1.0"
 usage = "usage: %prog [options] time log message"
 description = (
     "A stupidly simple time tracker. Supports concurrent marked "
